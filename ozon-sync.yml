@@ -1,0 +1,46 @@
+name: Ozon sync
+
+on:
+  schedule:
+    # Каждый день в 05:00 UTC = 08:00 по Москве
+    - cron: "0 5 * * *"
+  workflow_dispatch: {}   # позволяет запустить вручную кнопкой на GitHub
+
+permissions:
+  contents: write   # нужно, чтобы workflow мог закоммитить файлы с данными обратно в репозиторий
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Ozon sync
+        env:
+          OZON_SHOP_1_NAME: ${{ secrets.OZON_SHOP_1_NAME }}
+          OZON_SHOP_1_CLIENT_ID: ${{ secrets.OZON_SHOP_1_CLIENT_ID }}
+          OZON_SHOP_1_API_KEY: ${{ secrets.OZON_SHOP_1_API_KEY }}
+          OZON_SHOP_2_NAME: ${{ secrets.OZON_SHOP_2_NAME }}
+          OZON_SHOP_2_CLIENT_ID: ${{ secrets.OZON_SHOP_2_CLIENT_ID }}
+          OZON_SHOP_2_API_KEY: ${{ secrets.OZON_SHOP_2_API_KEY }}
+          OZON_SHOP_3_NAME: ${{ secrets.OZON_SHOP_3_NAME }}
+          OZON_SHOP_3_CLIENT_ID: ${{ secrets.OZON_SHOP_3_CLIENT_ID }}
+          OZON_SHOP_3_API_KEY: ${{ secrets.OZON_SHOP_3_API_KEY }}
+        run: python ozon_sync.py
+
+      - name: Commit results
+        run: |
+          git config user.name "ozon-sync-bot"
+          git config user.email "actions@github.com"
+          git add output/
+          git diff --staged --quiet || git commit -m "Данные Ozon за $(date +'%Y-%m-%d')"
+          git push
