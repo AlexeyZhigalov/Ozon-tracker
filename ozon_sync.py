@@ -28,6 +28,8 @@ OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "output")
 
 FBS_URL = "https://api-seller.ozon.ru/v3/posting/fbs/list"
 FBO_URL = "https://api-seller.ozon.ru/v2/posting/fbo/list"
+FINANCE_URL = "https://api-seller.ozon.ru/v3/finance/transaction/list"
+STOCK_URL = "https://api-seller.ozon.ru/v2/analytics/stock_on_warehouses"
 
 
 def load_shops_from_env():
@@ -144,6 +146,116 @@ def fetch_fbo_postings(client_id, api_key, days_back):
     return all_rows
 
 
+def fetch_finance_transactions(client_id, api_key, days_back):
+    """
+    Тянет финансовые операции (начисления) за последние days_back дней:
+    выручка, комиссия Ozon, логистика, реклама, эквайринг и т.д.
+    Одна строка = одна операция (заказ/услуга), с разбивкой по суммам.
+    """
+    headers = {
+        "Client-Id": client_id,
+        "Api-Key": api_key,
+        "Content-Type": "application/json",
+    }
+    since = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+    to = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    all_rows = []
+    page = 1
+    page_size = 1000
+    while True:
+        payload = {
+            "filter": {
+                "date": {"from": since, "to": to},
+                "transaction_type": "all",
+            },
+            "page": page,
+            "page_size": page_size,
+        }
+        resp = requests.post(FINANCE_URL, headers=headers, json=payload, timeout=30)
+        if resp.status_code != 200:
+            print(f"  ! Ошибка API (Finance) {resp.status_code}: {resp.text[:300]}", file=sys.stderr)
+            break
+
+        result = resp.json().get("result", {})
+        operations = result.get("operations", [])
+        if not operations:
+            break
+
+        for op in operations:
+            items = op.get("items") or [{}]
+            first_item = items[0] if items else {}
+            services = op.get("services", []) or []
+            services_total = sum(float(s.get("price", 0)) for s in services)
+            all_rows.append(
+                {
+                    "operation_id": op.get("operation_id"),
+                    "operation_date": op.get("operation_date"),
+                    "operation_type_name": op.get("operation_type_name"),
+                    "posting_number": (op.get("posting") or {}).get("posting_number"),
+                    "sku": first_item.get("sku"),
+                    "item_name": first_item.get("name"),
+                    "accruals_for_sale": op.get("accruals_for_sale"),
+                    "sale_commission": op.get("sale_commission"),
+                    "delivery_charge": op.get("delivery_charge"),
+                    "return_delivery_charge": op.get("return_delivery_charge"),
+                    "services_total": round(services_total, 2),
+                    "amount": op.get("amount"),
+                }
+            )
+
+        if len(operations) < page_size:
+            break
+        page += 1
+
+    return all_rows
+
+
+def fetch_stock_on_warehouses(client_id, api_key):
+    """Тянет остатки товаров на складах Ozon (FBO) по всем складам/кластерам."""
+    headers = {
+        "Client-Id": client_id,
+        "Api-Key": api_key,
+        "Content-Type": "application/json",
+    }
+
+    all_rows = []
+    offset = 0
+    limit = 500
+    while True:
+        payload = {"limit": limit, "offset": offset, "warehouse_type": "ALL"}
+        resp = requests.post(STOCK_URL, headers=headers, json=payload, timeout=30)
+        if resp.status_code != 200:
+            print(f"  ! Ошибка API (Stock) {resp.status_code}: {resp.text[:300]}", file=sys.stderr)
+            break
+
+        rows = resp.json().get("result", {}).get("rows", [])
+        if not rows:
+            break
+
+        for r in rows:
+            all_rows.append(
+                {
+                    "sku": r.get("sku"),
+                    "item_code": r.get("item_code"),
+                    "item_name": r.get("item_name"),
+                    "warehouse_name": r.get("warehouse_name"),
+                    "free_to_sell_amount": r.get("free_to_sell_amount"),
+                    "promised_amount": r.get("promised_amount"),
+                    "reserved_amount": r.get("reserved_amount"),
+                    "valid_stock_count": r.get("valid_stock_count"),
+                }
+            )
+
+        if len(rows) < limit:
+            break
+        offset += limit
+
+    return all_rows
+
+
 def write_csv(path, rows, extra_field=None, extra_value=None):
     if not rows:
         return
@@ -188,6 +300,20 @@ def main():
             f"{OUTPUT_DIR}/{today}_{safe_name}.csv",
             [{"fulfillment": "FBO", **r} for r in fbo_rows]
             + [{"fulfillment": "FBS", **r} for r in fbs_rows],
+        )
+
+        finance_rows = fetch_finance_transactions(shop["client_id"], shop["api_key"], DAYS_BACK)
+        print(f"   Начисления: {len(finance_rows)} операций")
+        write_csv(
+            f"{OUTPUT_DIR}/{today}_{safe_name}_finance.csv",
+            [{"shop": shop["name"], **r} for r in finance_rows],
+        )
+
+        stock_rows = fetch_stock_on_warehouses(shop["client_id"], shop["api_key"])
+        print(f"   Остатки на складах: {len(stock_rows)} строк")
+        write_csv(
+            f"{OUTPUT_DIR}/{today}_{safe_name}_stock.csv",
+            [{"shop": shop["name"], **r} for r in stock_rows],
         )
 
     write_csv(f"{OUTPUT_DIR}/{today}_all_shops.csv", combined_rows)
