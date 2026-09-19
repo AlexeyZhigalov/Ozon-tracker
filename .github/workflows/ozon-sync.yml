@@ -2,11 +2,12 @@ name: Ozon sync
 
 on:
   schedule:
+    # Каждый день в 05:00 UTC = 08:00 по Москве
     - cron: "0 5 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch: {}   # позволяет запустить вручную кнопкой на GitHub
 
 permissions:
-  contents: write
+  contents: write   # нужно, чтобы workflow мог закоммитить файлы с данными обратно в репозиторий
 
 jobs:
   sync:
@@ -40,6 +41,7 @@ jobs:
         run: |
           git config user.name "ozon-sync-bot"
           git config user.email "actions@github.com"
+          mkdir -p output
           git add output/
           git diff --staged --quiet || git commit -m "Данные Ozon за $(date +'%Y-%m-%d')"
           git push
