@@ -146,40 +146,39 @@ def fetch_fbo_postings(client_id, api_key, days_back):
     return all_rows
 
 
-def fetch_finance_transactions(client_id, api_key, days_back):
+def fetch_finance_transactions(client_id, api_key, posting_numbers):
     """
-    Тянет начисления по отправлениям за последние days_back дней через
-    новый метод /v1/finance/accrual/postings (старый v3/finance/transaction/list
-    Ozon отключил 6 июля 2026 года).
+    Тянет начисления по конкретным отправлениям через новый метод
+    /v1/finance/accrual/postings (старый v3/finance/transaction/list Ozon
+    отключил 6 июля 2026 года).
 
-    Точная структура ответа этого метода не задокументирована публично,
-    поэтому код разбирает несколько вероятных вариантов формы ответа и,
-    если ни один не подошёл, печатает в лог реальные ключи ответа —
-    чтобы можно было быстро донастроить разбор по факту.
+    В отличие от старого метода, этот НЕ принимает диапазон дат — только
+    список номеров отправлений (posting_number), не больше 200 за один
+    запрос. Поэтому сначала нужны сами отправления (берём из FBO/FBS),
+    а начисления по ним добираем отдельно, пачками.
     """
+    if not posting_numbers:
+        return []
+
     headers = {
         "Client-Id": client_id,
         "Api-Key": api_key,
         "Content-Type": "application/json",
     }
-    since = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime(
-        "%Y-%m-%dT%H:%M:%S.000Z"
-    )
-    to = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     all_rows = []
-    page = 1
-    page_size = 1000
-    while True:
-        payload = {
-            "date": {"from": since, "to": to},
-            "page": page,
-            "page_size": page_size,
-        }
+    batch_size = 200
+    batches = [
+        posting_numbers[i : i + batch_size]
+        for i in range(0, len(posting_numbers), batch_size)
+    ]
+
+    for batch in batches:
+        payload = {"posting_numbers": batch}
         resp = requests.post(FINANCE_URL, headers=headers, json=payload, timeout=30)
         if resp.status_code != 200:
             print(f"  ! Ошибка API (Finance) {resp.status_code}: {resp.text[:500]}", file=sys.stderr)
-            break
+            continue
 
         data = resp.json()
         result = data.get("result", data)
@@ -201,25 +200,35 @@ def fetch_finance_transactions(client_id, api_key, days_back):
                 )
                 print(f"  ! Пример ответа: {str(data)[:800]}", file=sys.stderr)
 
-        if not postings:
-            break
-
         for p in postings:
-            all_rows.append(
-                {
-                    "posting_number": p.get("posting_number"),
-                    "operation_date": p.get("operation_date") or p.get("date"),
-                    "accrual_type": p.get("accrual_type") or p.get("type") or p.get("operation_type_name"),
-                    "sku": p.get("sku"),
-                    "item_name": p.get("name") or p.get("item_name"),
-                    "quantity": p.get("quantity"),
-                    "amount": p.get("amount") or p.get("sum") or p.get("total"),
-                }
-            )
-
-        if len(postings) < page_size:
-            break
-        page += 1
+            # Начисления могут быть вложены списком внутри каждого отправления —
+            # разбираем оба варианта: плоский список или список с вложенными accruals.
+            accruals = p.get("accruals") if isinstance(p.get("accruals"), list) else None
+            if accruals:
+                for a in accruals:
+                    all_rows.append(
+                        {
+                            "posting_number": p.get("posting_number"),
+                            "operation_date": a.get("operation_date") or a.get("date"),
+                            "accrual_type": a.get("accrual_type") or a.get("type") or a.get("name"),
+                            "sku": a.get("sku"),
+                            "item_name": a.get("name") or a.get("item_name"),
+                            "quantity": a.get("quantity"),
+                            "amount": a.get("amount") or a.get("sum") or a.get("total"),
+                        }
+                    )
+            else:
+                all_rows.append(
+                    {
+                        "posting_number": p.get("posting_number"),
+                        "operation_date": p.get("operation_date") or p.get("date"),
+                        "accrual_type": p.get("accrual_type") or p.get("type") or p.get("operation_type_name"),
+                        "sku": p.get("sku"),
+                        "item_name": p.get("name") or p.get("item_name"),
+                        "quantity": p.get("quantity"),
+                        "amount": p.get("amount") or p.get("sum") or p.get("total"),
+                    }
+                )
 
     return all_rows
 
@@ -313,7 +322,8 @@ def main():
             + [{"fulfillment": "FBS", **r} for r in fbs_rows],
         )
 
-        finance_rows = fetch_finance_transactions(shop["client_id"], shop["api_key"], DAYS_BACK)
+        posting_numbers = [r["posting_number"] for r in fbo_rows + fbs_rows if r.get("posting_number")]
+        finance_rows = fetch_finance_transactions(shop["client_id"], shop["api_key"], posting_numbers)
         print(f"   Начисления: {len(finance_rows)} операций")
         write_csv(
             f"{OUTPUT_DIR}/{today}_{safe_name}_finance.csv",
