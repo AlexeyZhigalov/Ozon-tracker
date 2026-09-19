@@ -29,6 +29,7 @@ OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "output")
 FBS_URL = "https://api-seller.ozon.ru/v3/posting/fbs/list"
 FBO_URL = "https://api-seller.ozon.ru/v2/posting/fbo/list"
 FINANCE_URL = "https://api-seller.ozon.ru/v1/finance/accrual/postings"
+FINANCE_TYPES_URL = "https://api-seller.ozon.ru/v1/finance/accrual/types"
 STOCK_URL = "https://api-seller.ozon.ru/v2/analytics/stock_on_warehouses"
 
 
@@ -146,7 +147,31 @@ def fetch_fbo_postings(client_id, api_key, days_back):
     return all_rows
 
 
-def fetch_finance_transactions(client_id, api_key, posting_numbers):
+def fetch_accrual_type_names(client_id, api_key):
+    """Тянет справочник типов начислений (type_id -> название), чтобы расшифровать коды."""
+    headers = {
+        "Client-Id": client_id,
+        "Api-Key": api_key,
+        "Content-Type": "application/json",
+    }
+    try:
+        resp = requests.post(FINANCE_TYPES_URL, headers=headers, json={}, timeout=30)
+        if resp.status_code != 200:
+            print(f"  ! Ошибка API (Finance types) {resp.status_code}: {resp.text[:300]}", file=sys.stderr)
+            return {}
+        data = resp.json()
+        result = data.get("result", data)
+        items = result if isinstance(result, list) else result.get("types") or result.get("items") or []
+        return {
+            item.get("type_id") or item.get("id"): item.get("name") or item.get("type_name")
+            for item in items
+        }
+    except Exception as e:
+        print(f"  ! Не удалось получить справочник типов начислений: {e}", file=sys.stderr)
+        return {}
+
+
+def fetch_finance_transactions(client_id, api_key, posting_numbers, type_names=None):
     """
     Тянет начисления по конкретным отправлениям через новый метод
     /v1/finance/accrual/postings (старый v3/finance/transaction/list Ozon
@@ -156,10 +181,17 @@ def fetch_finance_transactions(client_id, api_key, posting_numbers):
     список номеров отправлений (posting_number), не больше 200 за один
     запрос. Поэтому сначала нужны сами отправления (берём из FBO/FBS),
     а начисления по ним добираем отдельно, пачками.
+
+    Ответ Ozon: {"posting_accruals": [{"posting_number": ..., "accruals": [
+        {"type_id": int, "accrued": {"amount": str, "currency": str},
+         "accrual_date": str, "seller_price": {"amount": str} | None,
+         "sku": int, "quantity": int}, ...
+    ]}, ...]}
     """
     if not posting_numbers:
         return []
 
+    type_names = type_names or {}
     headers = {
         "Client-Id": client_id,
         "Api-Key": api_key,
@@ -182,51 +214,25 @@ def fetch_finance_transactions(client_id, api_key, posting_numbers):
 
         data = resp.json()
         result = data.get("result", data)
-
-        if isinstance(result, list):
-            postings = result
-        else:
-            postings = (
-                result.get("postings")
-                or result.get("items")
-                or result.get("accruals")
-                or result.get("rows")
-                or []
-            )
-            if not postings and result:
-                print(
-                    f"  ! Неожиданная структура ответа (Finance), ключи верхнего уровня: {list(result.keys())}",
-                    file=sys.stderr,
-                )
-                print(f"  ! Пример ответа: {str(data)[:800]}", file=sys.stderr)
+        postings = result.get("posting_accruals", []) if isinstance(result, dict) else result
 
         for p in postings:
-            # Начисления могут быть вложены списком внутри каждого отправления —
-            # разбираем оба варианта: плоский список или список с вложенными accruals.
-            accruals = p.get("accruals") if isinstance(p.get("accruals"), list) else None
-            if accruals:
-                for a in accruals:
-                    all_rows.append(
-                        {
-                            "posting_number": p.get("posting_number"),
-                            "operation_date": a.get("operation_date") or a.get("date"),
-                            "accrual_type": a.get("accrual_type") or a.get("type") or a.get("name"),
-                            "sku": a.get("sku"),
-                            "item_name": a.get("name") or a.get("item_name"),
-                            "quantity": a.get("quantity"),
-                            "amount": a.get("amount") or a.get("sum") or a.get("total"),
-                        }
-                    )
-            else:
+            posting_number = p.get("posting_number")
+            for a in p.get("accruals", []) or []:
+                accrued = a.get("accrued") or {}
+                seller_price = a.get("seller_price") or {}
+                type_id = a.get("type_id")
                 all_rows.append(
                     {
-                        "posting_number": p.get("posting_number"),
-                        "operation_date": p.get("operation_date") or p.get("date"),
-                        "accrual_type": p.get("accrual_type") or p.get("type") or p.get("operation_type_name"),
-                        "sku": p.get("sku"),
-                        "item_name": p.get("name") or p.get("item_name"),
-                        "quantity": p.get("quantity"),
-                        "amount": p.get("amount") or p.get("sum") or p.get("total"),
+                        "posting_number": posting_number,
+                        "accrual_date": a.get("accrual_date"),
+                        "type_id": type_id,
+                        "accrual_type": type_names.get(type_id, f"type_{type_id}"),
+                        "sku": a.get("sku"),
+                        "quantity": a.get("quantity"),
+                        "seller_price": seller_price.get("amount"),
+                        "amount": accrued.get("amount"),
+                        "currency": accrued.get("currency"),
                     }
                 )
 
@@ -323,7 +329,8 @@ def main():
         )
 
         posting_numbers = [r["posting_number"] for r in fbo_rows + fbs_rows if r.get("posting_number")]
-        finance_rows = fetch_finance_transactions(shop["client_id"], shop["api_key"], posting_numbers)
+        type_names = fetch_accrual_type_names(shop["client_id"], shop["api_key"])
+        finance_rows = fetch_finance_transactions(shop["client_id"], shop["api_key"], posting_numbers, type_names)
         print(f"   Начисления: {len(finance_rows)} операций")
         write_csv(
             f"{OUTPUT_DIR}/{today}_{safe_name}_finance.csv",
