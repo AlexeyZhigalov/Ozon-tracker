@@ -26,6 +26,29 @@ import requests
 DAYS_BACK = int(os.environ.get("DAYS_BACK", "7"))
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "output")
 
+# Явный период (например, "2026-08-01" и "2026-08-07") имеет приоритет над
+# DAYS_BACK. Если задан только DATE_FROM, DATE_TO по умолчанию — сегодня.
+DATE_FROM = os.environ.get("DATE_FROM", "").strip()
+DATE_TO = os.environ.get("DATE_TO", "").strip()
+
+
+def get_date_range():
+    """Возвращает (since, to) в формате Ozon ISO — либо из DATE_FROM/DATE_TO,
+    либо как скользящее окно 'последние DAYS_BACK дней'."""
+    if DATE_FROM:
+        since_dt = datetime.strptime(DATE_FROM, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if DATE_TO:
+            # +1 день, чтобы включить весь последний день периода целиком
+            to_dt = datetime.strptime(DATE_TO, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+        else:
+            to_dt = datetime.now(timezone.utc)
+    else:
+        to_dt = datetime.now(timezone.utc)
+        since_dt = to_dt - timedelta(days=DAYS_BACK)
+
+    fmt = "%Y-%m-%dT%H:%M:%S.000Z"
+    return since_dt.strftime(fmt), to_dt.strftime(fmt)
+
 FBS_URL = "https://api-seller.ozon.ru/v3/posting/fbs/list"
 FBO_URL = "https://api-seller.ozon.ru/v2/posting/fbo/list"
 FINANCE_URL = "https://api-seller.ozon.ru/v1/finance/accrual/postings"
@@ -63,17 +86,13 @@ def _row_from_posting(p):
     }
 
 
-def fetch_fbs_postings(client_id, api_key, days_back):
-    """Тянет отправления FBS за последние days_back дней, с пагинацией."""
+def fetch_fbs_postings(client_id, api_key, since, to):
+    """Тянет отправления FBS за период [since, to), с пагинацией."""
     headers = {
         "Client-Id": client_id,
         "Api-Key": api_key,
         "Content-Type": "application/json",
     }
-    since = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime(
-        "%Y-%m-%dT%H:%M:%S.000Z"
-    )
-    to = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     all_rows = []
     offset = 0
@@ -105,17 +124,13 @@ def fetch_fbs_postings(client_id, api_key, days_back):
     return all_rows
 
 
-def fetch_fbo_postings(client_id, api_key, days_back):
-    """Тянет отправления FBO (склад Ozon) за последние days_back дней, с пагинацией."""
+def fetch_fbo_postings(client_id, api_key, since, to):
+    """Тянет отправления FBO (склад Ozon) за период [since, to), с пагинацией."""
     headers = {
         "Client-Id": client_id,
         "Api-Key": api_key,
         "Content-Type": "application/json",
     }
-    since = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime(
-        "%Y-%m-%dT%H:%M:%S.000Z"
-    )
-    to = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     all_rows = []
     offset = 0
