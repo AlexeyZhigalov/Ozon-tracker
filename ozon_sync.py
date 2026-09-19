@@ -340,14 +340,17 @@ def main():
         print("Не найдено ни одного магазина в переменных окружения (OZON_SHOP_1_...).")
         sys.exit(1)
 
+    since, to = get_date_range()
+    print(f"Период: {since} .. {to}")
+
     today = datetime.now().strftime("%Y-%m-%d")
     combined_rows = []
 
     for shop in shops:
         print(f"-> Магазин: {shop['name']}")
 
-        fbo_rows = fetch_fbo_postings(shop["client_id"], shop["api_key"], DAYS_BACK)
-        fbs_rows = fetch_fbs_postings(shop["client_id"], shop["api_key"], DAYS_BACK)
+        fbo_rows = fetch_fbo_postings(shop["client_id"], shop["api_key"], since, to)
+        fbs_rows = fetch_fbs_postings(shop["client_id"], shop["api_key"], since, to)
         print(f"   FBO: {len(fbo_rows)}, FBS: {len(fbs_rows)}, всего: {len(fbo_rows) + len(fbs_rows)}")
 
         shop_rows = (
