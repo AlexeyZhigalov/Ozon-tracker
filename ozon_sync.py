@@ -157,15 +157,35 @@ def fetch_accrual_type_names(client_id, api_key):
     try:
         resp = requests.post(FINANCE_TYPES_URL, headers=headers, json={}, timeout=30)
         if resp.status_code != 200:
-            print(f"  ! Ошибка API (Finance types) {resp.status_code}: {resp.text[:300]}", file=sys.stderr)
+            print(f"  ! Ошибка API (Finance types) {resp.status_code}: {resp.text[:500]}", file=sys.stderr)
             return {}
         data = resp.json()
         result = data.get("result", data)
-        items = result if isinstance(result, list) else result.get("types") or result.get("items") or []
-        return {
-            item.get("type_id") or item.get("id"): item.get("name") or item.get("type_name")
-            for item in items
-        }
+
+        if isinstance(result, list):
+            items = result
+        else:
+            items = (
+                result.get("types")
+                or result.get("items")
+                or result.get("accrual_types")
+                or result.get("service_types")
+                or []
+            )
+            if not items:
+                print(
+                    f"  ! Справочник типов: неожиданная структура, ключи верхнего уровня: {list(result.keys()) if isinstance(result, dict) else type(result)}",
+                    file=sys.stderr,
+                )
+                print(f"  ! Пример ответа (types): {str(data)[:800]}", file=sys.stderr)
+
+        mapping = {}
+        for item in items:
+            type_id = item.get("type_id") or item.get("id") or item.get("accrual_type")
+            name = item.get("name") or item.get("type_name") or item.get("title")
+            if type_id is not None:
+                mapping[type_id] = name
+        return mapping
     except Exception as e:
         print(f"  ! Не удалось получить справочник типов начислений: {e}", file=sys.stderr)
         return {}
