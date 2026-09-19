@@ -4,7 +4,16 @@ on:
   schedule:
     # Каждый день в 05:00 UTC = 08:00 по Москве
     - cron: "0 5 * * *"
-  workflow_dispatch: {}   # позволяет запустить вручную кнопкой на GitHub
+  workflow_dispatch:      # позволяет запустить вручную кнопкой на GitHub
+    inputs:
+      date_from:
+        description: "Дата начала периода (YYYY-MM-DD). Оставить пустым — последние 7 дней"
+        required: false
+        default: ""
+      date_to:
+        description: "Дата конца периода (YYYY-MM-DD). Оставить пустым — по сегодня"
+        required: false
+        default: ""
 
 permissions:
   contents: write   # нужно, чтобы workflow мог закоммитить файлы с данными обратно в репозиторий
@@ -26,6 +35,8 @@ jobs:
 
       - name: Run Ozon sync
         env:
+          DATE_FROM: ${{ github.event.inputs.date_from }}
+          DATE_TO: ${{ github.event.inputs.date_to }}
           OZON_SHOP_1_NAME: ${{ secrets.OZON_SHOP_1_NAME }}
           OZON_SHOP_1_CLIENT_ID: ${{ secrets.OZON_SHOP_1_CLIENT_ID }}
           OZON_SHOP_1_API_KEY: ${{ secrets.OZON_SHOP_1_API_KEY }}
