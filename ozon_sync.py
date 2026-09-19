@@ -28,7 +28,7 @@ OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "output")
 
 FBS_URL = "https://api-seller.ozon.ru/v3/posting/fbs/list"
 FBO_URL = "https://api-seller.ozon.ru/v2/posting/fbo/list"
-FINANCE_URL = "https://api-seller.ozon.ru/v3/finance/transaction/list"
+FINANCE_URL = "https://api-seller.ozon.ru/v1/finance/accrual/postings"
 STOCK_URL = "https://api-seller.ozon.ru/v2/analytics/stock_on_warehouses"
 
 
@@ -148,9 +148,14 @@ def fetch_fbo_postings(client_id, api_key, days_back):
 
 def fetch_finance_transactions(client_id, api_key, days_back):
     """
-    Тянет финансовые операции (начисления) за последние days_back дней:
-    выручка, комиссия Ozon, логистика, реклама, эквайринг и т.д.
-    Одна строка = одна операция (заказ/услуга), с разбивкой по суммам.
+    Тянет начисления по отправлениям за последние days_back дней через
+    новый метод /v1/finance/accrual/postings (старый v3/finance/transaction/list
+    Ozon отключил 6 июля 2026 года).
+
+    Точная структура ответа этого метода не задокументирована публично,
+    поэтому код разбирает несколько вероятных вариантов формы ответа и,
+    если ни один не подошёл, печатает в лог реальные ключи ответа —
+    чтобы можно было быстро донастроить разбор по факту.
     """
     headers = {
         "Client-Id": client_id,
@@ -167,46 +172,52 @@ def fetch_finance_transactions(client_id, api_key, days_back):
     page_size = 1000
     while True:
         payload = {
-            "filter": {
-                "date": {"from": since, "to": to},
-                "transaction_type": "all",
-            },
+            "date": {"from": since, "to": to},
             "page": page,
             "page_size": page_size,
         }
         resp = requests.post(FINANCE_URL, headers=headers, json=payload, timeout=30)
         if resp.status_code != 200:
-            print(f"  ! Ошибка API (Finance) {resp.status_code}: {resp.text[:300]}", file=sys.stderr)
+            print(f"  ! Ошибка API (Finance) {resp.status_code}: {resp.text[:500]}", file=sys.stderr)
             break
 
-        result = resp.json().get("result", {})
-        operations = result.get("operations", [])
-        if not operations:
+        data = resp.json()
+        result = data.get("result", data)
+
+        if isinstance(result, list):
+            postings = result
+        else:
+            postings = (
+                result.get("postings")
+                or result.get("items")
+                or result.get("accruals")
+                or result.get("rows")
+                or []
+            )
+            if not postings and result:
+                print(
+                    f"  ! Неожиданная структура ответа (Finance), ключи верхнего уровня: {list(result.keys())}",
+                    file=sys.stderr,
+                )
+                print(f"  ! Пример ответа: {str(data)[:800]}", file=sys.stderr)
+
+        if not postings:
             break
 
-        for op in operations:
-            items = op.get("items") or [{}]
-            first_item = items[0] if items else {}
-            services = op.get("services", []) or []
-            services_total = sum(float(s.get("price", 0)) for s in services)
+        for p in postings:
             all_rows.append(
                 {
-                    "operation_id": op.get("operation_id"),
-                    "operation_date": op.get("operation_date"),
-                    "operation_type_name": op.get("operation_type_name"),
-                    "posting_number": (op.get("posting") or {}).get("posting_number"),
-                    "sku": first_item.get("sku"),
-                    "item_name": first_item.get("name"),
-                    "accruals_for_sale": op.get("accruals_for_sale"),
-                    "sale_commission": op.get("sale_commission"),
-                    "delivery_charge": op.get("delivery_charge"),
-                    "return_delivery_charge": op.get("return_delivery_charge"),
-                    "services_total": round(services_total, 2),
-                    "amount": op.get("amount"),
+                    "posting_number": p.get("posting_number"),
+                    "operation_date": p.get("operation_date") or p.get("date"),
+                    "accrual_type": p.get("accrual_type") or p.get("type") or p.get("operation_type_name"),
+                    "sku": p.get("sku"),
+                    "item_name": p.get("name") or p.get("item_name"),
+                    "quantity": p.get("quantity"),
+                    "amount": p.get("amount") or p.get("sum") or p.get("total"),
                 }
             )
 
-        if len(operations) < page_size:
+        if len(postings) < page_size:
             break
         page += 1
 
